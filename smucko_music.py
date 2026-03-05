@@ -11,18 +11,16 @@ from discord.ext import commands
 from discord import app_commands
 from plexapi.server import PlexServer
 
-# --- CONFIGURATION & LOGGING ---
+# --- 1. CONFIGURATION & LOGGING ---
 load_dotenv()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 PLEX_URL = os.getenv('PLEX_URL') 
 PLEX_TOKEN = os.getenv('PLEX_TOKEN')
 
-# Ensure the data directory exists (for Unraid Appdata)
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# Setup Logging to file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
@@ -33,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('smucko-music')
 
-# --- DATABASE SETUP ---
+# --- 2. DATABASE LOGIC ---
 db_path = f"{DATA_DIR}/settings.db"
 
 def init_db():
@@ -59,30 +57,43 @@ def set_stored_volume(guild_id, vol):
     conn.commit()
     conn.close()
 
-# --- INITIALIZE PLEX & DISCORD ---
-init_db()
-plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+# --- 3. BOT INITIALIZATION ---
+intents = discord.Intents.default()
+intents.message_content = True 
+intents.members = True          
+bot = commands.Bot(command_prefix="!", intents=intents)
 
+# --- 4. MUSIC VARIABLES & LOGIC ---
 music_queues = {}
 current_track = {} 
 play_history = {} 
 last_message = {} 
 dynamic_genres = ["Rock", "Pop", "Jazz"] 
 
-# (Rest of the GenreSelect and Logic remains the same, but uses logger and DB)
-
 async def update_live_tile(guild_id, track, channel=None):
     if not track: return
-    # We pull volume from DB now
     vol = get_stored_volume(guild_id)
-    
     embed = discord.Embed(title=f"🎧 {track.title}", color=discord.Color.green())
     embed.add_field(name="Artist", value=track.originalTitle or track.grandparentTitle, inline=False)
-    
-    # ... (Embed logic continues)
     embed.set_footer(text=f"Vol: {int(vol*100)}% | Queue: {len(music_queues.get(guild_id, []))} left")
-    
-    # ... (Message edit logic)
+    # ... (Rest of your message edit logic here)
 
-# Inside the Volume Buttons in MusicControlView:
-# set_stored_volume(self.guild_id, new_vol)
+# --- 5. THE STARTUP SEQUENCE (MUST BE AT THE VERY BOTTOM) ---
+def start_bot():
+    print("--- 🏁 Script Starting ---")
+    init_db()
+    
+    print(f"Connecting to Plex at: {PLEX_URL}")
+    try:
+        global plex
+        plex = PlexServer(PLEX_URL, PLEX_TOKEN)
+        print("✅ Plex Connected!")
+    except Exception as e:
+        print(f"❌ Plex Connection Failed: {e}")
+        return
+
+    print("Connecting to Discord...")
+    bot.run(DISCORD_TOKEN)
+
+if __name__ == "__main__":
+    start_bot()
