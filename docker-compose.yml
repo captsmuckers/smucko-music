@@ -1,0 +1,12 @@
+services:
+  smucko-music:
+    build: .
+    container_name: smucko-music
+    restart: unless-stopped
+    env_file:
+      - .env
+    # network_mode: host
+    
+    # If you experience any silence or dropped packets during playback due to 
+    # Unraid network routing, uncomment the line below to use Host network mode.
+    # network_mode: host
