@@ -121,40 +121,49 @@ class ArtistSelectionView(discord.ui.View):
         try:
             pool = []
             
-            # 1. Add some of the artist's own tracks to the pool
+            # 1. Grab 15 random tracks from the target artist
             artist_tracks = self.artist.tracks()
             if artist_tracks:
-                # We take a good chunk of their music to ensure they show up
                 pool.extend(random.sample(artist_tracks, min(len(artist_tracks), 15)))
 
-            # 2. Add the Official Plex Station tracks to the pool
+            # 2. Try the Official Plex Station (Discovery tracks)
             try:
                 station = self.artist.station()
                 if station:
                     from plexapi.playqueue import PlayQueue
                     pq = PlayQueue.fromStationKey(plex, station.key)
+                    # Add tracks from the station to the pool
                     pool.extend(pq.items)
-            except:
-                pass 
+            except Exception as e:
+                logger.warning(f"Official Station failed: {e}")
 
-            # 3. Fallback: If the pool is still small, add Genre tracks
-            if len(pool) < 10:
-                genres = [g.tag for g in self.artist.genres]
-                if genres:
-                    music_lib = plex.library.section('Music')
-                    fallback = music_lib.search(genre=genres[:2], libtype='track')
-                    pool.extend(random.sample(fallback, min(len(fallback), 40)))
+            # 3. MANDATORY MIX-IN: Grab tracks from the same genre to ensure variety
+            # We do this even if the station worked to guarantee it's not just one artist
+            genres = [g.tag for g in self.artist.genres]
+            if genres:
+                music_lib = plex.library.section('Music')
+                # Search for tracks in the first two genres of the artist
+                genre_tracks = music_lib.search(genre=genres[:2], libtype='track')
+                
+                # Filter out the tracks we already have from the main artist
+                other_artists_tracks = [t for t in genre_tracks if t.grandparentRatingKey != self.artist.ratingKey]
+                
+                if other_artists_tracks:
+                    # Grab up to 40 random tracks from other artists in this genre
+                    pool.extend(random.sample(other_artists_tracks, min(len(other_artists_tracks), 40)))
 
             if pool:
-                # --- THE MAGIC STEP ---
-                # Remove duplicates and shuffle EVERYTHING so the artist is mixed in naturally
-                unique_pool = list(set(pool))
-                random.shuffle(unique_pool)
+                # Deduplicate by using the ratingKey (Plex's unique ID)
+                unique_map = {t.ratingKey: t for t in pool}
+                final_pool = list(unique_map.values())
                 
-                # Limit to a 50-song "session"
-                final_tracks = unique_pool[:50]
+                # Shuffle the combined list
+                random.shuffle(final_pool)
                 
-                await start_playback_sequence(interaction, final_tracks, f"📻 {self.artist.title} Radio (Mixed)")
+                # Take the first 50 for the session
+                final_tracks = final_pool[:50]
+                
+                await start_playback_sequence(interaction, final_tracks, f"Radio: {self.artist.title} & Similar")
             else:
                 await interaction.followup.send("Could not find enough music for a radio.", ephemeral=True)
                 
