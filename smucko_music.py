@@ -5,11 +5,17 @@ import random
 import asyncio
 import sqlite3
 import logging
+import sys
+import io
 from datetime import datetime
 from dotenv import load_dotenv
 from discord.ext import commands
 from discord import app_commands
 from plexapi.server import PlexServer
+
+# Force UTF-8 encoding for the console to prevent emoji crashes
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # --- 1. CONFIGURATION & LOGGING ---
 load_dotenv()
@@ -25,8 +31,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
     handlers=[
-        logging.FileHandler(f"{DATA_DIR}/bot_logs.txt"),
-        logging.StreamHandler()
+        logging.FileHandler(f"{DATA_DIR}/bot_logs.txt", encoding='utf-8'), # Added encoding here
+        logging.StreamHandler(sys.stdout) # Force stream to use our UTF-8 stdout
     ]
 )
 logger = logging.getLogger('smucko-music')
@@ -94,18 +100,155 @@ class GenreSelect(discord.ui.Select):
             await start_playback_sequence(interaction, tracks, f"📻 {genre_name} Radio")
         except: await interaction.followup.send("Error searching genres.", ephemeral=True)
 
+class ArtistSelectionView(discord.ui.View):
+    def __init__(self, artist, guild_id):
+        super().__init__(timeout=60)
+        self.artist = artist
+        self.guild_id = guild_id
+
+    # --- CHOICE 1: ENTIRE DISCOGRAPHY ---
+    @discord.ui.button(label="Entire Discography", style=discord.ButtonStyle.blurple)
+    async def play_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        tracks = self.artist.tracks()
+        random.shuffle(tracks)
+        await start_playback_sequence(interaction, tracks, f"Discography: {self.artist.title}")
+
+    # 2. THE NEW ARTIST RADIO BUTTON (Add it here!)
+    @discord.ui.button(label="Artist Radio", style=discord.ButtonStyle.green)
+    async def play_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pool = []
+            
+            # 1. Add some of the artist's own tracks to the pool
+            artist_tracks = self.artist.tracks()
+            if artist_tracks:
+                # We take a good chunk of their music to ensure they show up
+                pool.extend(random.sample(artist_tracks, min(len(artist_tracks), 15)))
+
+            # 2. Add the Official Plex Station tracks to the pool
+            try:
+                station = self.artist.station()
+                if station:
+                    from plexapi.playqueue import PlayQueue
+                    pq = PlayQueue.fromStationKey(plex, station.key)
+                    pool.extend(pq.items)
+            except:
+                pass 
+
+            # 3. Fallback: If the pool is still small, add Genre tracks
+            if len(pool) < 10:
+                genres = [g.tag for g in self.artist.genres]
+                if genres:
+                    music_lib = plex.library.section('Music')
+                    fallback = music_lib.search(genre=genres[:2], libtype='track')
+                    pool.extend(random.sample(fallback, min(len(fallback), 40)))
+
+            if pool:
+                # --- THE MAGIC STEP ---
+                # Remove duplicates and shuffle EVERYTHING so the artist is mixed in naturally
+                unique_pool = list(set(pool))
+                random.shuffle(unique_pool)
+                
+                # Limit to a 50-song "session"
+                final_tracks = unique_pool[:50]
+                
+                await start_playback_sequence(interaction, final_tracks, f"📻 {self.artist.title} Radio (Mixed)")
+            else:
+                await interaction.followup.send("Could not find enough music for a radio.", ephemeral=True)
+                
+        except Exception as e:
+            logger.error(f"Radio error: {e}")
+            await interaction.followup.send(f"Error starting radio: {e}", ephemeral=True)
+
+    # --- START OF CHOICE 2 & 3: ALBUM OR SONG ---
+    @discord.ui.button(label="Pick an Album", style=discord.ButtonStyle.gray)
+    async def pick_album(self, interaction: discord.Interaction, button: discord.ui.Button):
+        albums = self.artist.albums()
+        if not albums:
+            return await interaction.response.send_message("No albums found.", ephemeral=True)
+        
+        view = discord.ui.View()
+        select = discord.ui.Select(placeholder="Choose an album...")
+        
+        for album in albums[:25]:
+            select.add_option(
+                label=album.title[:100], 
+                value=str(album.ratingKey), 
+                description=f"{album.year or 'Unknown'}"
+            )
+
+        async def album_callback(int_select: discord.Interaction):
+            await int_select.response.defer(ephemeral=True)
+            album_id = int(select.values[0]) 
+            selected_album = plex.fetchItem(album_id)
+            album_tracks = selected_album.tracks()
+            
+            # Create song selection menu
+            song_view = discord.ui.View()
+            song_select = discord.ui.Select(placeholder=f"Pick a song (or play all)...")
+            
+            # --- CHOICE 2: PLAY ENTIRE ALBUM ---
+            song_select.add_option(label="-- Play Entire Album --", value="ALL", description=f"Plays all tracks in {selected_album.title}")
+            
+            # --- CHOICE 3: PLAY SPECIFIC SONG ---
+            for track in album_tracks[:24]:
+                song_select.add_option(
+                    label=f"{track.trackNumber}. {track.title}"[:100],
+                    value=str(track.ratingKey)
+                )
+
+            async def song_callback(int_song: discord.Interaction):
+                await int_song.response.defer(ephemeral=True)
+                if song_select.values[0] == "ALL":
+                    await start_playback_sequence(int_song, album_tracks, f"Album: {selected_album.title}")
+                else:
+                    selected_track_id = int(song_select.values[0])
+                    # Find where the song is in the album to play the rest after it
+                    start_index = next((i for i, t in enumerate(album_tracks) if t.ratingKey == selected_track_id), 0)
+                    ordered_tracks = album_tracks[start_index:]
+                    await start_playback_sequence(int_song, ordered_tracks, f"🎵 {ordered_tracks[0].title}")
+
+            song_select.callback = song_callback
+            song_view.add_item(song_select)
+            await int_select.edit_original_response(content=f"**{selected_album.title}** by {self.artist.title}:", view=song_view)
+
+        select.callback = album_callback
+        view.add_item(select)
+        await interaction.response.edit_message(content=f"Select an album by **{self.artist.title}**:", view=view)
+
 class SearchModal(discord.ui.Modal, title="Search Plex Music"):
     search_query = discord.ui.TextInput(label="Song, Artist, or Album", placeholder="Enter search terms...", required=True)
+    
     def __init__(self, guild_id):
         super().__init__()
         self.guild_id = guild_id
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            tracks = plex.library.section('Music').search(self.search_query.value, libtype='track')
-            if not tracks: return await interaction.followup.send("No results found.", ephemeral=True)
-            await start_playback_sequence(interaction, tracks[:10], f"🔍 Search: {self.search_query.value}")
-        except: await interaction.followup.send("Search error.", ephemeral=True)
+            music_library = plex.library.section('Music')
+            query = self.search_query.value
+            
+            # Look for an exact Artist match
+            artists = music_library.search(title=query, libtype='artist')
+            
+            if artists:
+                # If we found an artist (like Kendrick Lamar), show the NEW menu
+                artist = artists[0]
+                view = ArtistSelectionView(artist, interaction.guild.id)
+                await interaction.followup.send(f"Found **{artist.title}**. What would you like to play?", view=view, ephemeral=True)
+            else:
+                # If no artist found, just search for tracks normally
+                tracks = music_library.search(title=query, libtype='track')
+                if not tracks:
+                    return await interaction.followup.send("No results found.", ephemeral=True)
+                await start_playback_sequence(interaction, tracks[:5], f"🔍 Search: {query}")
+                
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            await interaction.followup.send("Error during search. Check Plex connection.", ephemeral=True)
 
 class MusicControlView(discord.ui.View):
     def __init__(self, guild_id):
@@ -163,28 +306,76 @@ class MusicControlView(discord.ui.View):
         if interaction.guild.voice_client: interaction.guild.voice_client.stop()
         await interaction.response.defer()
 
+    @discord.ui.button(label="📜 Queue", style=discord.ButtonStyle.gray, row=2)
+    async def queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.guild_id
+        if guild_id not in current_track:
+            return await interaction.response.send_message("🔇 Nothing is playing.", ephemeral=True)
+
+        now_playing = current_track[guild_id]
+        queue_list = music_queues.get(guild_id, [])
+        
+        # Build the message safely
+        header = f"🎶 **Now Playing:** {now_playing.title}\n\n**Up Next:**\n"
+        lines = []
+        
+        for i, track in enumerate(queue_list[:15], 1): # Limit to top 15
+            lines.append(f"{i}. {track.title} - {track.originalTitle or track.grandparentTitle}")
+
+        if not lines:
+            content = header + "_Queue is empty._"
+        else:
+            footer = f"\n\n*+ {len(queue_list) - 15} more tracks...*" if len(queue_list) > 15 else ""
+            content = header + "\n".join(lines) + footer
+
+        # Final safety check: if the 15 songs are still too long, we slice even more
+        if len(content) > 1900:
+            content = content[:1900] + "..."
+
+        await interaction.response.send_message(content, ephemeral=True)
+
+
 # --- 6. CORE MUSIC LOGIC ---
 
 async def update_live_tile(guild_id, track, channel=None):
-    if not track: return
     vol = get_stored_volume(guild_id)
-    
-    embed = discord.Embed(title=f"🎧 {track.title}", color=discord.Color.green())
-    embed.add_field(name="Artist", value=track.originalTitle or track.grandparentTitle, inline=True)
-    embed.add_field(name="Album", value=track.parentTitle, inline=True)
-    
-    try:
-        embed.set_thumbnail(url=track.thumbUrl)
-    except: pass
-
-    status = "⏸️ Paused"
-    vc = bot.get_guild(int(guild_id)).voice_client
-    if vc and vc.is_playing(): status = "🎶 Playing"
-
-    embed.set_footer(text=f"{status} | Vol: {int(vol*100)}% | Queue: {len(music_queues.get(guild_id, []))} left")
-
+    queue = music_queues.get(guild_id, [])
     view = MusicControlView(guild_id)
     
+    # --- HANDLE STOPPED STATE ---
+    if not track:
+        embed = discord.Embed(
+            title="⏹️ Playback Stopped", 
+            description="Queue cleared or music finished.",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text=f"Ready for new music | Vol: {int(vol*100)}%")
+    
+    # --- HANDLE PLAYING STATE ---
+    else:
+        embed = discord.Embed(title=f"🎧 {track.title}", color=discord.Color.green())
+        embed.add_field(name="Artist", value=track.originalTitle or track.grandparentTitle, inline=True)
+        embed.add_field(name="Album", value=track.parentTitle, inline=True)
+        
+        # Get Next Song Name
+        next_up = "End of Queue"
+        if queue:
+            next_track = queue[0]
+            next_up = f"{next_track.title} by {next_track.originalTitle or next_track.grandparentTitle}"
+        
+        embed.add_field(name="⏭️ Next Up", value=next_up, inline=False)
+
+        try:
+            embed.set_thumbnail(url=track.thumbUrl)
+        except: pass
+
+        status = "⏸️ Paused"
+        vc = bot.get_guild(int(guild_id)).voice_client
+        if vc and vc.is_playing(): status = "🎶 Playing"
+
+        embed.set_footer(text=f"{status} | Vol: {int(vol*100)}% | Total in Queue: {len(queue)}")
+
+    # --- UPDATE OR SEND MESSAGE ---
     if guild_id in last_message:
         try:
             await last_message[guild_id].edit(embed=embed, view=view)
@@ -230,25 +421,23 @@ async def start_playback_sequence(interaction, tracks, message):
 async def refresh_genres():
     global dynamic_genres
     try:
-        # This is the more reliable way to get genres from a music library
         music_library = plex.library.section('Music')
-        # We query the 'genre' field specifically
-        tags = music_library.listField('genre')
         
-        # Extract titles, sort them, and grab the top 25
-        found_genres = sorted([t.title for t in tags])[:25]
+        # Method: Get tags from the search filter choices
+        # This is the most reliable way to get the exact list Plex uses for filters
+        tags = music_library.listFilterChoices('genre')
         
-        if found_genres:
+        if tags:
+            # Sort and take top 25
+            found_genres = sorted([t.title for t in tags if t.title])[:25]
             dynamic_genres = found_genres
             logger.info(f"Synced {len(dynamic_genres)} genres from Plex.")
+        else:
+            logger.warning("No genres found, using defaults.")
     except Exception as e:
-        # If listField also fails, we'll try an alternative search-based approach
-        try:
-            tags = plex.library.section('Music').search(libtype='genre', limit=25)
-            dynamic_genres = sorted([t.title for t in tags])
-            logger.info(f"Synced {len(dynamic_genres)} genres via search.")
-        except Exception as e2:
-            logger.error(f"Could not sync genres: {e2}")
+        logger.error(f"Genre Sync Error: {e}")
+        # Fallback to defaults so the Select Menu doesn't break
+        dynamic_genres = ["Rock", "Pop", "Jazz", "Electronic", "Classical"]
 
 # --- 7. SLASH COMMANDS ---
 
@@ -269,6 +458,55 @@ async def music(interaction: discord.Interaction):
     if tracks:
         await interaction.channel.send("🎛️ Smucko Music Control Panel", view=MusicControlView(interaction.guild.id))
         await interaction.followup.send("Control panel opened.", ephemeral=True)
+
+@bot.tree.command(name="clear", description="Clear the music queue and stop playback")
+async def clear(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    
+    # 1. Clear the actual list of upcoming songs
+    if guild_id in music_queues:
+        music_queues[guild_id].clear()
+    
+    # 2. Stop the current song if something is playing
+    if interaction.guild.voice_client:
+        interaction.guild.voice_client.stop()
+        
+    # 3. Clean up the "current_track" tracker
+    current_track.pop(guild_id, None)
+    
+    await interaction.response.send_message("🧹 **Queue cleared and playback stopped.**", ephemeral=True)
+    
+    # Optional: Update the live tile to show it's stopped
+    await update_live_tile(guild_id, None)
+
+@bot.tree.command(name="queue", description="See the list of upcoming songs")
+async def queue(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    
+    # Check if anything is playing
+    if guild_id not in current_track:
+        return await interaction.response.send_message("🔇 Nothing is currently playing.", ephemeral=True)
+
+    # Start the list with the Now Playing track
+    now_playing = current_track[guild_id]
+    queue_list = music_queues.get(guild_id, [])
+    
+    msg = f"**Now Playing:** {now_playing.title} - {now_playing.originalTitle or now_playing.grandparentTitle}\n\n"
+    msg += "**Up Next:**\n"
+
+    if not queue_list:
+        msg += "_Queue is empty._"
+    else:
+        # Grab the first 10 songs so the message doesn't get too long
+        for i, track in enumerate(queue_list[:10], 1):
+            artist = track.originalTitle or track.grandparentTitle
+            msg += f"{i}. **{track.title}** - {artist}\n"
+        
+        # If there are more than 10, show a count of the remainder
+        if len(queue_list) > 10:
+            msg += f"\n*...and {len(queue_list) - 10} more tracks.*"
+
+    await interaction.response.send_message(msg, ephemeral=True)
 
 # --- 8. BOT EVENTS ---
 
