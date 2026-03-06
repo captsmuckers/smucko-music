@@ -230,14 +230,25 @@ async def start_playback_sequence(interaction, tracks, message):
 async def refresh_genres():
     global dynamic_genres
     try:
+        # This is the more reliable way to get genres from a music library
         music_library = plex.library.section('Music')
-        tags = music_library.listTags('genre')
+        # We query the 'genre' field specifically
+        tags = music_library.listField('genre')
+        
+        # Extract titles, sort them, and grab the top 25
         found_genres = sorted([t.title for t in tags])[:25]
+        
         if found_genres:
             dynamic_genres = found_genres
             logger.info(f"Synced {len(dynamic_genres)} genres from Plex.")
     except Exception as e:
-        logger.error(f"Could not sync genres: {e}")
+        # If listField also fails, we'll try an alternative search-based approach
+        try:
+            tags = plex.library.section('Music').search(libtype='genre', limit=25)
+            dynamic_genres = sorted([t.title for t in tags])
+            logger.info(f"Synced {len(dynamic_genres)} genres via search.")
+        except Exception as e2:
+            logger.error(f"Could not sync genres: {e2}")
 
 # --- 7. SLASH COMMANDS ---
 
