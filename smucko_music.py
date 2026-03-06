@@ -17,12 +17,10 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 PLEX_URL = os.getenv('PLEX_URL')
 PLEX_TOKEN = os.getenv('PLEX_TOKEN')
 
-# Ensure the data directory exists for Unraid Appdata
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# Setup Logging to file and stream (Unbuffered for Docker)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
@@ -75,6 +73,7 @@ dynamic_genres = ["Rock", "Pop", "Jazz"]
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+# We use commands.Bot to access the command tree, but we use Slash Commands
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- 5. UI COMPONENTS (Selects, Buttons, Modals) ---
@@ -240,37 +239,47 @@ async def refresh_genres():
     except Exception as e:
         logger.error(f"Could not sync genres: {e}")
 
-# --- 7. BOT EVENTS & COMMANDS ---
+# --- 7. SLASH COMMANDS ---
+
+@bot.tree.command(name="play", description="Search and play a song from Plex")
+async def play(interaction: discord.Interaction, search: str):
+    await interaction.response.defer(ephemeral=True)
+    tracks = plex.library.section('Music').search(search, libtype='track')
+    if not tracks: 
+        return await interaction.followup.send("No tracks found.", ephemeral=True)
+    await start_playback_sequence(interaction, tracks, f"Playing: {search}")
+
+@bot.tree.command(name="music", description="Open the music control panel")
+async def music(interaction: discord.Interaction):
+    """Explicitly opens the control tile"""
+    await interaction.response.defer(ephemeral=True)
+    # Get a random popular track to start the tile if nothing is playing
+    tracks = plex.library.section('Music').search(libtype='track', limit=1)
+    if tracks:
+        await interaction.channel.send("🎛️ Smucko Music Control Panel", view=MusicControlView(interaction.guild.id))
+        await interaction.followup.send("Control panel opened.", ephemeral=True)
+
+# --- 8. BOT EVENTS ---
 
 @bot.event
 async def on_ready():
     logger.info(f"--- 🚀 Logged in as {bot.user.name} ---")
     await refresh_genres()
-
-@bot.command()
-async def play(ctx, *, search: str):
-    """Fallback command line search"""
-    tracks = plex.library.section('Music').search(search, libtype='track')
-    if not tracks: return await ctx.send("No tracks found.")
     
-    # Simulating an interaction for the sequence helper
-    class MockInteraction:
-        def __init__(self, ctx):
-            self.guild = ctx.guild
-            self.user = ctx.author
-            self.channel = ctx.channel
-            self.followup = ctx
-    
-    await start_playback_sequence(MockInteraction(ctx), tracks[:1], f"Playing {search}")
+    # This syncs the slash commands to Discord's servers
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f"Successfully synced {len(synced)} slash commands.")
+    except Exception as e:
+        logger.error(f"Failed to sync slash commands: {e}")
 
-# --- 8. THE STARTUP SEQUENCE ---
+# --- 9. THE STARTUP SEQUENCE ---
 
 if __name__ == "__main__":
     print("--- 🏁 Script Starting ---")
     init_db()
     
     try:
-        # Initialize Plex globally
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
         print("✅ Plex Connected!")
     except Exception as e:
