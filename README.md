@@ -23,6 +23,7 @@ Discord Bot Token (via Discord Developer Portal)
 1. Clone the Repository
 Bash
 git clone https://github.com/captsmuckers/smucko-music.git
+Navigate to the smucko-music folder
 cd smucko-music
 2. Install Requirements
 Bash
