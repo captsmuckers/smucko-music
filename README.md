@@ -17,10 +17,10 @@ Persistent Settings: Remembers server volume levels across restarts using a loca
 **Installation**
 
 Prerequisites:
-Python 3.10 or higher
-FFmpeg (Required for audio streaming)
-Plex Media Server (with Remote Access or local IP access)
-Discord Bot Token (via Discord Developer Portal)
+Python 3.10 or higher  
+FFmpeg (Required for audio streaming)  
+Plex Media Server (with Remote Access or local IP access)  
+Discord Bot Token (via Discord Developer Portal)  
 
 1. Clone the Repository
 Bash
