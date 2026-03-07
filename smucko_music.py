@@ -114,118 +114,45 @@ class ArtistSelectionView(discord.ui.View):
         random.shuffle(tracks)
         await start_playback_sequence(interaction, tracks, f"Discography: {self.artist.title}")
 
-    # 2. THE NEW ARTIST RADIO BUTTON (Add it here!)
+    # --- CHOICE 2: NATIVE PLEX ARTIST RADIO ---
     @discord.ui.button(label="Artist Radio", style=discord.ButtonStyle.green)
     async def play_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
-            pool = []
+            # 1. Ask Plex for the specific 'Station' for this artist
+            station = self.artist.station()
             
-            # 1. Grab 15 random tracks from the target artist
-            artist_tracks = self.artist.tracks()
-            if artist_tracks:
-                pool.extend(random.sample(artist_tracks, min(len(artist_tracks), 15)))
-
-            # 2. Try the Official Plex Station (Discovery tracks)
-            try:
-                station = self.artist.station()
-                if station:
-                    from plexapi.playqueue import PlayQueue
-                    pq = PlayQueue.fromStationKey(plex, station.key)
-                    # Add tracks from the station to the pool
-                    pool.extend(pq.items)
-            except Exception as e:
-                logger.warning(f"Official Station failed: {e}")
-
-            # 3. MANDATORY MIX-IN: Grab tracks from the same genre to ensure variety
-            # We do this even if the station worked to guarantee it's not just one artist
+            if station:
+                from plexapi.playqueue import PlayQueue
+                # 2. Generate a PlayQueue from that station
+                # This uses Plex's native discovery/sonic analysis
+                pq = PlayQueue.fromStationKey(plex, station.key)
+                
+                if pq.items:
+                    # We take the items Plex provided (usually about 50 tracks)
+                    radio_tracks = pq.items
+                    await start_playback_sequence(interaction, radio_tracks, f"Radio: {self.artist.title} Station")
+                    return
+            
+            # 3. FALLBACK: If Plex Station isn't available, use Genre Radio
+            logger.warning(f"Native station unavailable for {self.artist.title}. Using genre fallback.")
             genres = [g.tag for g in self.artist.genres]
             if genres:
                 music_lib = plex.library.section('Music')
-                # Search for tracks in the first two genres of the artist
-                genre_tracks = music_lib.search(genre=genres[:2], libtype='track')
-                
-                # Filter out the tracks we already have from the main artist
-                other_artists_tracks = [t for t in genre_tracks if t.grandparentRatingKey != self.artist.ratingKey]
-                
-                if other_artists_tracks:
-                    # Grab up to 40 random tracks from other artists in this genre
-                    pool.extend(random.sample(other_artists_tracks, min(len(other_artists_tracks), 40)))
-
-            if pool:
-                # Deduplicate by using the ratingKey (Plex's unique ID)
-                unique_map = {t.ratingKey: t for t in pool}
-                final_pool = list(unique_map.values())
-                
-                # Shuffle the combined list
-                random.shuffle(final_pool)
-                
-                # Take the first 50 for the session
-                final_tracks = final_pool[:50]
-                
-                await start_playback_sequence(interaction, final_tracks, f"Radio: {self.artist.title} & Similar")
+                fallback_tracks = music_lib.search(genre=genres[0], libtype='track')
+                random.shuffle(fallback_tracks)
+                await start_playback_sequence(interaction, fallback_tracks[:50], f"Genre Radio: {genres[0]}")
             else:
-                await interaction.followup.send("Could not find enough music for a radio.", ephemeral=True)
-                
+                await interaction.followup.send("Plex Radio is unavailable for this artist.", ephemeral=True)
+
         except Exception as e:
             logger.error(f"Radio error: {e}")
-            await interaction.followup.send(f"Error starting radio: {e}", ephemeral=True)
+            await interaction.followup.send(f"Error starting Plex Radio: {e}", ephemeral=True)
 
-    # --- START OF CHOICE 2 & 3: ALBUM OR SONG ---
+    # --- CHOICE 3: PICK AN ALBUM ---
     @discord.ui.button(label="Pick an Album", style=discord.ButtonStyle.gray)
     async def pick_album(self, interaction: discord.Interaction, button: discord.ui.Button):
-        albums = self.artist.albums()
-        if not albums:
-            return await interaction.response.send_message("No albums found.", ephemeral=True)
-        
-        view = discord.ui.View()
-        select = discord.ui.Select(placeholder="Choose an album...")
-        
-        for album in albums[:25]:
-            select.add_option(
-                label=album.title[:100], 
-                value=str(album.ratingKey), 
-                description=f"{album.year or 'Unknown'}"
-            )
-
-        async def album_callback(int_select: discord.Interaction):
-            await int_select.response.defer(ephemeral=True)
-            album_id = int(select.values[0]) 
-            selected_album = plex.fetchItem(album_id)
-            album_tracks = selected_album.tracks()
-            
-            # Create song selection menu
-            song_view = discord.ui.View()
-            song_select = discord.ui.Select(placeholder=f"Pick a song (or play all)...")
-            
-            # --- CHOICE 2: PLAY ENTIRE ALBUM ---
-            song_select.add_option(label="-- Play Entire Album --", value="ALL", description=f"Plays all tracks in {selected_album.title}")
-            
-            # --- CHOICE 3: PLAY SPECIFIC SONG ---
-            for track in album_tracks[:24]:
-                song_select.add_option(
-                    label=f"{track.trackNumber}. {track.title}"[:100],
-                    value=str(track.ratingKey)
-                )
-
-            async def song_callback(int_song: discord.Interaction):
-                await int_song.response.defer(ephemeral=True)
-                if song_select.values[0] == "ALL":
-                    await start_playback_sequence(int_song, album_tracks, f"Album: {selected_album.title}")
-                else:
-                    selected_track_id = int(song_select.values[0])
-                    # Find where the song is in the album to play the rest after it
-                    start_index = next((i for i, t in enumerate(album_tracks) if t.ratingKey == selected_track_id), 0)
-                    ordered_tracks = album_tracks[start_index:]
-                    await start_playback_sequence(int_song, ordered_tracks, f"🎵 {ordered_tracks[0].title}")
-
-            song_select.callback = song_callback
-            song_view.add_item(song_select)
-            await int_select.edit_original_response(content=f"**{selected_album.title}** by {self.artist.title}:", view=song_view)
-
-        select.callback = album_callback
-        view.add_item(select)
-        await interaction.response.edit_message(content=f"Select an album by **{self.artist.title}**:", view=view)
+        # ... (keep your existing pick_album code here) ...
 
 class SearchModal(discord.ui.Modal, title="Search Plex Music"):
     search_query = discord.ui.TextInput(label="Song, Artist, or Album", placeholder="Enter search terms...", required=True)
