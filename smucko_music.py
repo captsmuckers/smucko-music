@@ -152,7 +152,58 @@ class ArtistSelectionView(discord.ui.View):
     # --- CHOICE 3: PICK AN ALBUM ---
     @discord.ui.button(label="Pick an Album", style=discord.ButtonStyle.gray)
     async def pick_album(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # ... (keep your existing pick_album code here) ...
+        albums = self.artist.albums()
+        if not albums:
+            return await interaction.response.send_message("No albums found.", ephemeral=True)
+        
+        view = discord.ui.View()
+        select = discord.ui.Select(placeholder="Choose an album...")
+        
+        for album in albums[:25]:
+            select.add_option(
+                label=album.title[:100], 
+                value=str(album.ratingKey), 
+                description=f"{album.year or 'Unknown'}"
+            )
+
+        async def album_callback(int_select: discord.Interaction):
+            await int_select.response.defer(ephemeral=True)
+            album_id = int(select.values[0]) 
+            selected_album = plex.fetchItem(album_id)
+            album_tracks = selected_album.tracks()
+            
+            # Create song selection menu
+            song_view = discord.ui.View()
+            song_select = discord.ui.Select(placeholder=f"Pick a song (or play all)...")
+            
+            # --- CHOICE 2: PLAY ENTIRE ALBUM ---
+            song_select.add_option(label="-- Play Entire Album --", value="ALL", description=f"Plays all tracks in {selected_album.title}")
+            
+            # --- CHOICE 3: PLAY SPECIFIC SONG ---
+            for track in album_tracks[:24]:
+                song_select.add_option(
+                    label=f"{track.trackNumber}. {track.title}"[:100],
+                    value=str(track.ratingKey)
+                )
+
+            async def song_callback(int_song: discord.Interaction):
+                await int_song.response.defer(ephemeral=True)
+                if song_select.values[0] == "ALL":
+                    await start_playback_sequence(int_song, album_tracks, f"Album: {selected_album.title}")
+                else:
+                    selected_track_id = int(song_select.values[0])
+                    # Find where the song is in the album to play the rest after it
+                    start_index = next((i for i, t in enumerate(album_tracks) if t.ratingKey == selected_track_id), 0)
+                    ordered_tracks = album_tracks[start_index:]
+                    await start_playback_sequence(int_song, ordered_tracks, f"🎵 {ordered_tracks[0].title}")
+
+            song_select.callback = song_callback
+            song_view.add_item(song_select)
+            await int_select.edit_original_response(content=f"**{selected_album.title}** by {self.artist.title}:", view=song_view)
+
+        select.callback = album_callback
+        view.add_item(select)
+        await interaction.response.edit_message(content=f"Select an album by **{self.artist.title}**:", view=view)
 
 class SearchModal(discord.ui.Modal, title="Search Plex Music"):
     search_query = discord.ui.TextInput(label="Song, Artist, or Album", placeholder="Enter search terms...", required=True)
